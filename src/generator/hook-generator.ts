@@ -197,9 +197,12 @@ interface HookInput {
 }
 
 interface HookOutput {
-  decision?: 'allow' | 'block' | 'allowAndPause';
+  decision?: 'block';
   reason?: string;
-  hookSpecificOutput?: Record<string, unknown>;
+  hookSpecificOutput?: {
+    hookEventName: 'PostToolUse';
+    additionalContext?: string;
+  };
 }
 
 function shouldTrigger(input: HookInput): boolean {
@@ -230,15 +233,30 @@ function shouldTrigger(input: HookInput): boolean {
 }
 
 function matchesAnyPattern(filePath: string, patterns: string[]): boolean {
+  // Get just the filename for simple patterns, full path for glob patterns
+  const fileName = filePath.split('/').pop() || filePath;
+
   return patterns.some(pattern => {
-    // Convert glob to regex (simple implementation)
-    const regex = pattern
+    // Convert glob to regex
+    let regex = pattern
+      .replace(/\\./g, '\\\\.')
       .replace(/\\*\\*/g, '{{GLOBSTAR}}')
       .replace(/\\*/g, '[^/]*')
       .replace(/{{GLOBSTAR}}/g, '.*')
-      .replace(/\\./g, '\\\\.')
       .replace(/\\?/g, '.');
-    return new RegExp(\`^\${regex}$\`).test(filePath);
+
+    // If pattern starts with **/, match against full path without requiring start anchor
+    if (pattern.startsWith('**/')) {
+      return new RegExp(\`\${regex}$\`).test(filePath);
+    }
+
+    // For simple patterns like *.js, match against filename
+    if (!pattern.includes('/')) {
+      return new RegExp(\`^\${regex}$\`).test(fileName);
+    }
+
+    // For other patterns, try to match the end of the path
+    return new RegExp(\`\${regex}$\`).test(filePath);
   });
 }
 
@@ -304,17 +322,19 @@ async function main(): Promise<void> {
     const response = await callClaude(prompt);
     const { decision, reason } = parseResponse(response);
 
-    // Build output
+    // Build output matching Claude Code's expected schema
     const output: HookOutput = {
+      decision: decision === 'block' ? 'block' : undefined,
       reason: \`[\${HOOK_NAME}] \${reason}\`,
       hookSpecificOutput: {
-        hookName: HOOK_NAME,
-        claudeResponse: response.slice(0, 500)
+        hookEventName: 'PostToolUse',
+        additionalContext: \`Hook: \${HOOK_NAME}. Claude response: \${response.slice(0, 300)}\`
       }
     };
 
-    if (decision === 'block') {
-      output.decision = 'block';
+    // Remove undefined decision for cleaner output
+    if (!output.decision) {
+      delete output.decision;
     }
 
     console.log(JSON.stringify(output));
@@ -326,12 +346,20 @@ async function main(): Promise<void> {
     if (OPTIONS.failMode === 'closed') {
       console.log(JSON.stringify({
         decision: 'block',
-        reason: \`[\${HOOK_NAME}] Error (fail-closed): \${errorMsg}\`
+        reason: \`[\${HOOK_NAME}] Error (fail-closed): \${errorMsg}\`,
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUse',
+          additionalContext: \`Hook error: \${errorMsg}\`
+        }
       }));
     } else {
       // Fail open - allow the operation
       console.log(JSON.stringify({
-        reason: \`[\${HOOK_NAME}] Error (fail-open): \${errorMsg}\`
+        reason: \`[\${HOOK_NAME}] Error (fail-open): \${errorMsg}\`,
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUse',
+          additionalContext: \`Hook error (allowed): \${errorMsg}\`
+        }
       }));
     }
   }
@@ -367,13 +395,12 @@ function escapeTemplateString(str: string): string {
 export function generateSettingsEntry(definition: HookDefinition, hookPath: string): object {
   const entry: {
     matcher?: string;
-    hooks: Array<{ type: string; command: string; timeout: number }>;
+    hooks: Array<{ type: string; command: string }>;
   } = {
     hooks: [
       {
         type: 'command',
         command: `npx tsx ${hookPath}`,
-        timeout: 30,
       },
     ],
   };

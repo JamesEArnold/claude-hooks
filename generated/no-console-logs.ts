@@ -1,8 +1,8 @@
 #!/usr/bin/env npx tsx
 /**
- * Generated Claude Hook: security-check
- * Source: security-check.md
- * Generated: 2025-12-30T20:15:37.704Z
+ * Generated Claude Hook: no-console-logs
+ * Source: no-console-logs.md
+ * Generated: 2025-12-30T20:15:37.703Z
  *
  * This hook uses Claude Agent SDK for validation.
  * No API key required - uses existing Claude Code session.
@@ -14,7 +14,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 // Configuration (from markdown)
 // ============================================================================
 
-const HOOK_NAME = "security-check";
+const HOOK_NAME = "no-console-logs";
 
 const TRIGGER: {
   event: string;
@@ -35,7 +35,8 @@ const TRIGGER: {
   "files": [
     "**/*.ts",
     "**/*.tsx",
-    "**/*.js"
+    "**/*.js",
+    "**/*.jsx"
   ]
 };
 
@@ -44,16 +45,14 @@ const OPTIONS = {
   "maxTurns": 1
 };
 
-const VALIDATION_PROMPT = `Review this code for security vulnerabilities:
+const VALIDATION_PROMPT = `Check this code for console.log statements.
 
-1. **Hardcoded Secrets**: Check for API keys, passwords, tokens, or credentials
-2. **SQL Injection**: Look for string concatenation in SQL queries
-3. **XSS Vulnerabilities**: Check for unsanitized user input in HTML output
-4. **Command Injection**: Look for unsanitized input in shell commands
-5. **Path Traversal**: Check for unsanitized file paths
+Look for:
+1. \`console.log(...)\` calls
+2. \`console.log\` passed as a callback or reference
 
-If you find critical security issues, block the change and explain why.
-For minor concerns, allow but mention them in the reason.`;
+If any console.log statements are found, block the change and specify which line(s) contain them.
+Allow console.warn, console.error, and console.info - only block console.log specifically.`;
 
 // ============================================================================
 // Claude Integration

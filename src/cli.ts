@@ -23,13 +23,16 @@ Generate Claude-powered hooks from markdown definitions.
 
 Usage:
   claude-hooks generate <files...> [-o <output>]  Generate hooks from markdown
+  claude-hooks install <file> [-o <output>]       Generate and install a hook
   claude-hooks settings <hooks...>                Generate settings.json entries
   claude-hooks validate <files...>                Validate markdown definitions
+  claude-hooks list                               List installed hooks
   claude-hooks --help                             Show this help
   claude-hooks --version                          Show version
 
 Examples:
   claude-hooks generate hooks/*.md -o generated/
+  claude-hooks install hooks/security-check.md
   claude-hooks settings generated/*.ts
   claude-hooks validate hooks/security-check.md
 
@@ -243,6 +246,150 @@ async function commandValidate(files: string[]): Promise<void> {
   }
 }
 
+const SETTINGS_PATH = path.join(process.env.HOME || '~', '.claude', 'settings.json');
+
+interface ClaudeSettings {
+  hooks?: {
+    [event: string]: Array<{
+      matcher?: string;
+      hooks: Array<{
+        type: string;
+        command: string;
+        timeout?: number;
+      }>;
+    }>;
+  };
+  [key: string]: unknown;
+}
+
+function loadSettings(): ClaudeSettings {
+  try {
+    if (fs.existsSync(SETTINGS_PATH)) {
+      const content = fs.readFileSync(SETTINGS_PATH, 'utf-8');
+      return JSON.parse(content);
+    }
+  } catch (error) {
+    console.error(`Warning: Could not read settings: ${(error as Error).message}`);
+  }
+  return {};
+}
+
+function saveSettings(settings: ClaudeSettings): void {
+  const dir = path.dirname(SETTINGS_PATH);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+}
+
+async function commandInstall(files: string[], output: string): Promise<void> {
+  if (files.length === 0) {
+    console.error('Error: No input file specified');
+    console.error('Usage: claude-hooks install <file> [-o <output>]');
+    process.exit(1);
+  }
+
+  const file = files[0];
+  console.log(`Installing hook from ${path.basename(file)}...`);
+
+  // Step 1: Generate the hook
+  let hookPath: string;
+  let definition;
+  try {
+    const result = generateHook(file, output);
+    hookPath = path.resolve(result.outputPath);
+    definition = result.definition;
+    console.log(`  ✓ Generated ${path.basename(hookPath)}`);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error(`  ✗ Generation failed: ${msg}`);
+    process.exit(1);
+  }
+
+  // Step 2: Update settings.json
+  try {
+    const settings = loadSettings();
+
+    // Initialize hooks structure if needed
+    if (!settings.hooks) {
+      settings.hooks = {};
+    }
+
+    const event = definition.trigger.event;
+    if (!settings.hooks[event]) {
+      settings.hooks[event] = [];
+    }
+
+    // Create the hook entry (no timeout - let Claude Code use default)
+    const hookEntry = {
+      matcher: definition.trigger.tools?.join('|'),
+      hooks: [{
+        type: 'command' as const,
+        command: `npx tsx ${hookPath}`,
+      }],
+    };
+
+    // Check if this hook already exists (by command path)
+    const existingIndex = settings.hooks[event].findIndex(
+      (h) => h.hooks.some((hh) => hh.command.includes(path.basename(hookPath)))
+    );
+
+    if (existingIndex >= 0) {
+      // Update existing
+      settings.hooks[event][existingIndex] = hookEntry;
+      console.log(`  ✓ Updated existing hook in settings.json`);
+    } else {
+      // Add new
+      settings.hooks[event].push(hookEntry);
+      console.log(`  ✓ Added hook to settings.json`);
+    }
+
+    saveSettings(settings);
+
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.error(`  ✗ Failed to update settings: ${msg}`);
+    process.exit(1);
+  }
+
+  // Step 3: Confirm
+  console.log(`\n✓ Hook '${definition.name}' installed successfully!`);
+  console.log(`  Event: ${definition.trigger.event}`);
+  if (definition.trigger.tools) {
+    console.log(`  Tools: ${definition.trigger.tools.join(', ')}`);
+  }
+  if (definition.trigger.files) {
+    console.log(`  Files: ${definition.trigger.files.join(', ')}`);
+  }
+  console.log(`\nThe hook is now active and will run on matching operations.`);
+}
+
+async function commandList(): Promise<void> {
+  const settings = loadSettings();
+
+  if (!settings.hooks || Object.keys(settings.hooks).length === 0) {
+    console.log('No hooks installed.');
+    return;
+  }
+
+  console.log('Installed hooks:\n');
+
+  for (const [event, hooks] of Object.entries(settings.hooks)) {
+    console.log(`${event}:`);
+    for (const hook of hooks) {
+      const matcher = hook.matcher ? ` (${hook.matcher})` : '';
+      for (const h of hook.hooks) {
+        if (h.type === 'command') {
+          // Extract hook name from command
+          const match = h.command.match(/([^/]+)\.ts$/);
+          const name = match ? match[1] : h.command;
+          console.log(`  - ${name}${matcher}`);
+        }
+      }
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
@@ -251,12 +398,20 @@ async function main(): Promise<void> {
       await commandGenerate(args.files, args.output);
       break;
 
+    case 'install':
+      await commandInstall(args.files, args.output);
+      break;
+
     case 'settings':
       await commandSettings(args.files);
       break;
 
     case 'validate':
       await commandValidate(args.files);
+      break;
+
+    case 'list':
+      await commandList();
       break;
 
     case '':
