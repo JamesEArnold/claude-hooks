@@ -11,10 +11,19 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 import { generateHook, generateSettingsEntry } from './generator/hook-generator.js';
 import { parseMarkdownFile, validateHookDefinition } from './parser/md-parser.js';
 
 const VERSION = '1.0.0';
+
+// Get the directory where claude-hooks is installed
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PROJECT_ROOT = path.resolve(__dirname, '..');
+
+// Export for use in generated hooks
+export const CLAUDE_HOOKS_DIR = process.env.CLAUDE_HOOKS_DIR || PROJECT_ROOT;
 
 function printHelp(): void {
   console.log(`
@@ -22,21 +31,23 @@ Claude Hooks v${VERSION}
 Generate Claude-powered hooks from markdown definitions.
 
 Usage:
+  claude-hooks setup                              Install /create-hook command
   claude-hooks generate <files...> [-o <output>]  Generate hooks from markdown
   claude-hooks install <file> [-o <output>]       Generate and install a hook
   claude-hooks settings <hooks...>                Generate settings.json entries
   claude-hooks validate <files...>                Validate markdown definitions
   claude-hooks list                               List installed hooks
+  claude-hooks path                               Show installation path
   claude-hooks --help                             Show this help
   claude-hooks --version                          Show version
 
 Examples:
+  claude-hooks setup                    # First-time setup
   claude-hooks generate hooks/*.md -o generated/
   claude-hooks install hooks/security-check.md
-  claude-hooks settings generated/*.ts
   claude-hooks validate hooks/security-check.md
 
-Learn more: https://github.com/your-repo/claude-hooks
+Learn more: https://github.com/anthropics/claude-hooks
 `);
 }
 
@@ -390,10 +401,182 @@ async function commandList(): Promise<void> {
   }
 }
 
+async function commandSetup(): Promise<void> {
+  console.log('Setting up Claude Hooks...\n');
+
+  const commandsDir = path.join(process.env.HOME || '~', '.claude', 'commands');
+  const commandPath = path.join(commandsDir, 'create-hook.md');
+
+  // Create commands directory if it doesn't exist
+  if (!fs.existsSync(commandsDir)) {
+    fs.mkdirSync(commandsDir, { recursive: true });
+    console.log(`  ✓ Created ${commandsDir}`);
+  }
+
+  // Generate the create-hook command with correct paths
+  const createHookCommand = generateCreateHookCommand(CLAUDE_HOOKS_DIR);
+
+  // Write the command file
+  fs.writeFileSync(commandPath, createHookCommand, 'utf-8');
+  console.log(`  ✓ Installed /create-hook command`);
+
+  // Print next steps
+  console.log(`
+Setup complete!
+
+Next steps:
+  1. Restart Claude Code to load the new command
+  2. Type /create-hook to create your first hook
+  3. Or manually create hooks in: ${path.join(CLAUDE_HOOKS_DIR, 'hooks')}
+
+Example usage:
+  /create-hook              # Interactive hook creation
+  claude-hooks list         # List installed hooks
+  claude-hooks install <file.md>  # Install a hook from markdown
+
+Installation path: ${CLAUDE_HOOKS_DIR}
+`);
+}
+
+function commandPath(): void {
+  console.log(CLAUDE_HOOKS_DIR);
+}
+
+function generateCreateHookCommand(projectDir: string): string {
+  return `---
+description: Create a new Claude-powered validation hook from a natural language description
+allowed-tools: Write, Edit, Bash(npx:*), Bash(cd:*), Read, Glob
+---
+
+# Create a Claude-Powered Hook
+
+You are helping the user create a custom validation hook for Claude Code. These hooks use Claude to validate code changes in real-time.
+
+## Workflow
+
+### 1. Understand the Hook
+
+Ask the user these questions explicitly (don't infer or assume):
+
+1. **Purpose**: "What would you like your hook to validate?"
+2. **Files**: "Which file types should this apply to?" (e.g., *.ts, *.js, all files)
+3. **Action**: "Should this hook BLOCK the operation when issues are found, or just WARN?" (This is required - always ask)
+4. **Trigger**: When to run? (default: PostToolUse on Edit/Write - can mention this default)
+
+**Important**: Always explicitly ask about blocking vs warning. Never infer this from the type of check.
+
+### 2. Create the Markdown Definition
+
+Generate a hook name from the purpose (kebab-case, e.g., \`no-console-logs\`, \`detect-secrets\`).
+
+Write the markdown file to:
+\`${projectDir}/hooks/<hook-name>.md\`
+
+Use this exact format:
+
+\`\`\`markdown
+# Hook: <hook-name>
+
+## Trigger
+- Event: PostToolUse
+- Tools: Edit, Write
+- Files: <file-patterns, comma-separated>
+- Skip: **/*.test.ts, **/*.spec.ts, node_modules/**
+
+## Prompt
+<Clear validation instructions based on user's description>
+
+<Specific things to check for, as a numbered or bulleted list>
+
+If critical issues are found, block the change and explain why.
+For minor concerns, allow but mention them in the reason.
+
+## Options
+- Fail Mode: <closed for block, open for warn>
+- Max Turns: 1
+\`\`\`
+
+### 3. Generate the Hook
+
+Run this command to compile the markdown into an executable TypeScript hook:
+
+\`\`\`bash
+cd ${projectDir} && npx tsx src/cli.ts generate hooks/<hook-name>.md -o generated/
+\`\`\`
+
+### 4. Install the Hook
+
+Read the current settings from \`~/.claude/settings.json\`.
+
+The hook entry format depends on the lifecycle event. For PostToolUse hooks:
+
+\`\`\`json
+{
+  "matcher": "Edit|Write",
+  "hooks": [{
+    "type": "command",
+    "command": "npx tsx ${projectDir}/generated/<hook-name>.ts"
+  }]
+}
+\`\`\`
+
+Add this to the \`hooks.PostToolUse\` array in settings.json. If \`hooks.PostToolUse\` doesn't exist, create it.
+
+Use the Edit tool to update the settings file, being careful to:
+- Preserve existing hooks
+- Add the new hook to the appropriate array
+- Maintain valid JSON formatting
+
+### 5. Confirm Success
+
+Tell the user:
+- The hook name and what it validates
+- That it's now active on Edit/Write operations
+- Example: "Your 'detect-secrets' hook is now active! It will check all .ts/.js files for hardcoded secrets when you edit them."
+
+## Important Guidelines
+
+- **Always ask** whether the hook should block or warn - never assume
+- Always use **absolute paths** for the generated hook command
+- **Merge** with existing hooks, never overwrite the entire hooks section
+- Keep prompts **concise but specific** - Claude will use these to make decisions
+- The hook runs inside Claude Code, so it uses the existing Claude session (no API key needed)
+- If user says "block" → set \`Fail Mode: closed\`
+- If user says "warn" → set \`Fail Mode: open\`
+
+## Hook Prompt Tips
+
+Good hook prompts are:
+- Specific about what to look for
+- Clear about when to block vs. warn
+- Focused on a single concern
+
+Example good prompt:
+\`\`\`
+Check this TypeScript code for hardcoded secrets:
+1. API keys (strings starting with sk-, pk-, api_, etc.)
+2. Passwords in variable assignments
+3. AWS/GCP/Azure credentials
+4. JWT tokens or bearer tokens
+
+Block if any secrets are found. Explain which line contains the secret.
+\`\`\`
+
+Example poor prompt:
+\`\`\`
+Check if the code is good.
+\`\`\`
+`;
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
   switch (args.command) {
+    case 'setup':
+      await commandSetup();
+      break;
+
     case 'generate':
       await commandGenerate(args.files, args.output);
       break;
@@ -412,6 +595,10 @@ async function main(): Promise<void> {
 
     case 'list':
       await commandList();
+      break;
+
+    case 'path':
+      commandPath();
       break;
 
     case '':
