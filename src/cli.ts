@@ -15,6 +15,8 @@ import { fileURLToPath } from 'url';
 import { generateHook, generateSettingsEntry } from './generator/hook-generator.js';
 import { parseMarkdownFile, validateHookDefinition } from './parser/md-parser.js';
 
+import * as readline from 'readline';
+
 const VERSION = '1.0.0';
 
 // Get the directory where claude-hooks is installed
@@ -25,18 +27,77 @@ const PROJECT_ROOT = path.resolve(__dirname, '..');
 // Export for use in generated hooks
 export const CLAUDE_HOOKS_DIR = process.env.CLAUDE_HOOKS_DIR || PROJECT_ROOT;
 
+// Config file path
+const CONFIG_PATH = path.join(process.env.HOME || '~', '.claude', 'claude-hooks-config.json');
+
+interface ClaudeHooksConfig {
+  hooksDir: string;      // Where markdown definitions are stored
+  generatedDir: string;  // Where generated TypeScript hooks go
+}
+
+function loadConfig(): ClaudeHooksConfig | null {
+  try {
+    if (fs.existsSync(CONFIG_PATH)) {
+      const content = fs.readFileSync(CONFIG_PATH, 'utf-8');
+      return JSON.parse(content);
+    }
+  } catch (error) {
+    // Config doesn't exist or is invalid
+  }
+  return null;
+}
+
+function saveConfig(config: ClaudeHooksConfig): void {
+  const dir = path.dirname(CONFIG_PATH);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+}
+
+function getHooksDir(): string {
+  const config = loadConfig();
+  if (config?.hooksDir) {
+    return config.hooksDir;
+  }
+  return path.join(CLAUDE_HOOKS_DIR, 'hooks');
+}
+
+function getGeneratedDir(): string {
+  const config = loadConfig();
+  if (config?.generatedDir) {
+    return config.generatedDir;
+  }
+  return path.join(CLAUDE_HOOKS_DIR, 'generated');
+}
+
+function askQuestion(query: string): Promise<string> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  return new Promise((resolve) => {
+    rl.question(query, (answer) => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
+
 function printHelp(): void {
   console.log(`
 Claude Hooks v${VERSION}
 Generate Claude-powered hooks from markdown definitions.
 
 Usage:
-  claude-hooks setup                              Install /create-hook command
+  claude-hooks setup                              First-time setup (choose storage location)
   claude-hooks generate <files...> [-o <output>]  Generate hooks from markdown
   claude-hooks install <file> [-o <output>]       Generate and install a hook
   claude-hooks settings <hooks...>                Generate settings.json entries
   claude-hooks validate <files...>                Validate markdown definitions
   claude-hooks list                               List installed hooks
+  claude-hooks config                             Show current configuration
   claude-hooks path                               Show installation path
   claude-hooks --help                             Show this help
   claude-hooks --version                          Show version
@@ -134,6 +195,9 @@ async function commandGenerate(files: string[], output: string): Promise<void> {
     process.exit(1);
   }
 
+  // Use configured directory if no explicit output specified
+  const outputDir = output === './generated' ? getGeneratedDir() : output;
+
   const resolvedFiles = resolveFiles(files);
   console.log(`Generating ${resolvedFiles.length} hook(s)...`);
 
@@ -142,7 +206,7 @@ async function commandGenerate(files: string[], output: string): Promise<void> {
 
   for (const file of resolvedFiles) {
     try {
-      const result = generateHook(file, output);
+      const result = generateHook(file, outputDir);
       console.log(`  ✓ ${path.basename(file)} → ${path.basename(result.outputPath)}`);
       success++;
     } catch (error) {
@@ -155,9 +219,9 @@ async function commandGenerate(files: string[], output: string): Promise<void> {
   console.log(`\nGenerated: ${success}, Failed: ${failed}`);
 
   if (success > 0) {
-    console.log(`\nOutput directory: ${path.resolve(output)}`);
+    console.log(`\nOutput directory: ${path.resolve(outputDir)}`);
     console.log(`\nTo use these hooks, add them to your .claude/settings.json:`);
-    console.log(`  claude-hooks settings ${output}/*.ts`);
+    console.log(`  claude-hooks settings ${outputDir}/*.ts`);
   }
 
   if (failed > 0) {
@@ -303,11 +367,14 @@ async function commandInstall(files: string[], output: string): Promise<void> {
   const file = files[0];
   console.log(`Installing hook from ${path.basename(file)}...`);
 
+  // Use configured directory if no explicit output specified
+  const outputDir = output === './generated' ? getGeneratedDir() : output;
+
   // Step 1: Generate the hook
   let hookPath: string;
   let definition;
   try {
-    const result = generateHook(file, output);
+    const result = generateHook(file, outputDir);
     hookPath = path.resolve(result.outputPath);
     definition = result.definition;
     console.log(`  ✓ Generated ${path.basename(hookPath)}`);
@@ -404,19 +471,55 @@ async function commandList(): Promise<void> {
 async function commandSetup(): Promise<void> {
   console.log('Setting up Claude Hooks...\n');
 
+  // Check if already configured
+  const existingConfig = loadConfig();
+  let hooksDir: string;
+  let generatedDir: string;
+
+  if (existingConfig) {
+    console.log(`Found existing configuration:`);
+    console.log(`  Hooks directory: ${existingConfig.hooksDir}`);
+    console.log(`  Generated directory: ${existingConfig.generatedDir}\n`);
+
+    const reconfigure = await askQuestion('Reconfigure storage locations? [y/N] ');
+    if (reconfigure.toLowerCase() !== 'y') {
+      hooksDir = existingConfig.hooksDir;
+      generatedDir = existingConfig.generatedDir;
+    } else {
+      const dirs = await askStorageLocation();
+      hooksDir = dirs.hooksDir;
+      generatedDir = dirs.generatedDir;
+    }
+  } else {
+    const dirs = await askStorageLocation();
+    hooksDir = dirs.hooksDir;
+    generatedDir = dirs.generatedDir;
+  }
+
+  // Save config
+  saveConfig({ hooksDir, generatedDir });
+  console.log(`  ✓ Saved configuration to ${CONFIG_PATH}`);
+
+  // Create directories if they don't exist
+  if (!fs.existsSync(hooksDir)) {
+    fs.mkdirSync(hooksDir, { recursive: true });
+    console.log(`  ✓ Created hooks directory: ${hooksDir}`);
+  }
+  if (!fs.existsSync(generatedDir)) {
+    fs.mkdirSync(generatedDir, { recursive: true });
+    console.log(`  ✓ Created generated directory: ${generatedDir}`);
+  }
+
+  // Install /create-hook command
   const commandsDir = path.join(process.env.HOME || '~', '.claude', 'commands');
   const commandPath = path.join(commandsDir, 'create-hook.md');
 
-  // Create commands directory if it doesn't exist
   if (!fs.existsSync(commandsDir)) {
     fs.mkdirSync(commandsDir, { recursive: true });
-    console.log(`  ✓ Created ${commandsDir}`);
   }
 
   // Generate the create-hook command with correct paths
-  const createHookCommand = generateCreateHookCommand(CLAUDE_HOOKS_DIR);
-
-  // Write the command file
+  const createHookCommand = generateCreateHookCommand(hooksDir, generatedDir);
   fs.writeFileSync(commandPath, createHookCommand, 'utf-8');
   console.log(`  ✓ Installed /create-hook command`);
 
@@ -424,25 +527,71 @@ async function commandSetup(): Promise<void> {
   console.log(`
 Setup complete!
 
+Configuration:
+  Hook definitions: ${hooksDir}
+  Generated hooks:  ${generatedDir}
+
 Next steps:
   1. Restart Claude Code to load the new command
   2. Type /create-hook to create your first hook
-  3. Or manually create hooks in: ${path.join(CLAUDE_HOOKS_DIR, 'hooks')}
+  3. Or manually create hooks in: ${hooksDir}
 
 Example usage:
   /create-hook              # Interactive hook creation
   claude-hooks list         # List installed hooks
   claude-hooks install <file.md>  # Install a hook from markdown
-
-Installation path: ${CLAUDE_HOOKS_DIR}
 `);
+}
+
+async function askStorageLocation(): Promise<{ hooksDir: string; generatedDir: string }> {
+  const globalHooksDir = path.join(process.env.HOME || '~', '.claude', 'hooks');
+  const globalGeneratedDir = path.join(process.env.HOME || '~', '.claude', 'hooks', 'generated');
+  const projectHooksDir = path.join(CLAUDE_HOOKS_DIR, 'hooks');
+  const projectGeneratedDir = path.join(CLAUDE_HOOKS_DIR, 'generated');
+
+  console.log('Where would you like to store your hooks?\n');
+  console.log('  [1] Global (Recommended)');
+  console.log(`      ${globalHooksDir}`);
+  console.log('      Hooks persist independently of this project\n');
+  console.log('  [2] Project-local');
+  console.log(`      ${projectHooksDir}`);
+  console.log('      Hooks are stored in this claude-hooks installation\n');
+
+  const choice = await askQuestion('Choose [1/2] (default: 1): ');
+
+  if (choice === '2') {
+    console.log(`\n  Using project-local storage`);
+    return { hooksDir: projectHooksDir, generatedDir: projectGeneratedDir };
+  } else {
+    console.log(`\n  Using global storage`);
+    return { hooksDir: globalHooksDir, generatedDir: globalGeneratedDir };
+  }
 }
 
 function commandPath(): void {
   console.log(CLAUDE_HOOKS_DIR);
 }
 
-function generateCreateHookCommand(projectDir: string): string {
+function commandConfig(): void {
+  const config = loadConfig();
+
+  if (!config) {
+    console.log('No configuration found. Run "claude-hooks setup" to configure.\n');
+    console.log('Current defaults:');
+    console.log(`  Hooks directory:     ${getHooksDir()}`);
+    console.log(`  Generated directory: ${getGeneratedDir()}`);
+    return;
+  }
+
+  console.log('Current configuration:\n');
+  console.log(`  Config file:         ${CONFIG_PATH}`);
+  console.log(`  Hooks directory:     ${config.hooksDir}`);
+  console.log(`  Generated directory: ${config.generatedDir}`);
+  console.log(`  CLI installation:    ${CLAUDE_HOOKS_DIR}`);
+  console.log(`\nTo change these settings, run: claude-hooks setup`);
+}
+
+function generateCreateHookCommand(hooksDir: string, generatedDir: string): string {
   return `---
 description: Create a new Claude-powered validation hook from a natural language description
 allowed-tools: Write, Edit, Bash(npx:*), Bash(cd:*), Read, Glob
@@ -470,7 +619,7 @@ Ask the user these questions explicitly (don't infer or assume):
 Generate a hook name from the purpose (kebab-case, e.g., \`no-console-logs\`, \`detect-secrets\`).
 
 Write the markdown file to:
-\`${projectDir}/hooks/<hook-name>.md\`
+\`${hooksDir}/<hook-name>.md\`
 
 Use this exact format:
 
@@ -501,7 +650,7 @@ For minor concerns, allow but mention them in the reason.
 Run this command to compile the markdown into an executable TypeScript hook:
 
 \`\`\`bash
-cd ${projectDir} && npx tsx src/cli.ts generate hooks/<hook-name>.md -o generated/
+npx tsx ${CLAUDE_HOOKS_DIR}/src/cli.ts generate ${hooksDir}/<hook-name>.md -o ${generatedDir}/
 \`\`\`
 
 ### 4. Install the Hook
@@ -515,7 +664,7 @@ The hook entry format depends on the lifecycle event. For PostToolUse hooks:
   "matcher": "Edit|Write",
   "hooks": [{
     "type": "command",
-    "command": "npx tsx ${projectDir}/generated/<hook-name>.ts"
+    "command": "npx tsx ${generatedDir}/<hook-name>.ts"
   }]
 }
 \`\`\`
@@ -595,6 +744,10 @@ async function main(): Promise<void> {
 
     case 'list':
       await commandList();
+      break;
+
+    case 'config':
+      commandConfig();
       break;
 
     case 'path':

@@ -37,7 +37,12 @@ cd claude-hooks
 The setup script will:
 1. Install dependencies
 2. Build the project
-3. Install the `/create-hook` command for Claude Code
+3. Ask where you want to store hooks (global or project-local)
+4. Install the `/create-hook` command for Claude Code
+
+**Storage options:**
+- **Global (Recommended)**: `~/.claude/hooks/` - Hooks persist independently of where you cloned this project
+- **Project-local**: `<project>/hooks/` - Hooks are stored within this claude-hooks installation
 
 ## Usage
 
@@ -58,7 +63,7 @@ Then it automatically creates and installs the hook.
 
 ### Manual Mode
 
-1. Create a markdown file in `hooks/`:
+1. Create a markdown file in your hooks directory (run `npx tsx src/cli.ts config` to see the location):
 
 ```markdown
 # Hook: detect-secrets
@@ -108,7 +113,7 @@ npx tsx src/cli.ts install hooks/detect-secrets.md
 ## CLI Commands
 
 ```bash
-# First-time setup
+# First-time setup (choose storage location)
 npx tsx src/cli.ts setup
 
 # Create and install a hook
@@ -122,6 +127,9 @@ npx tsx src/cli.ts validate hooks/my-hook.md
 
 # List installed hooks
 npx tsx src/cli.ts list
+
+# Show current configuration
+npx tsx src/cli.ts config
 
 # Show installation path
 npx tsx src/cli.ts path
