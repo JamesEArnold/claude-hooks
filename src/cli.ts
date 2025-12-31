@@ -15,8 +15,6 @@ import { fileURLToPath } from 'url';
 import { generateHook, generateSettingsEntry } from './generator/hook-generator.js';
 import { parseMarkdownFile, validateHookDefinition } from './parser/md-parser.js';
 
-import * as readline from 'readline';
-
 const VERSION = '1.0.0';
 
 // Get the directory where claude-hooks is installed
@@ -71,20 +69,6 @@ function getGeneratedDir(): string {
   return path.join(CLAUDE_HOOKS_DIR, 'generated');
 }
 
-function askQuestion(query: string): Promise<string> {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-
-  return new Promise((resolve) => {
-    rl.question(query, (answer) => {
-      rl.close();
-      resolve(answer.trim());
-    });
-  });
-}
-
 function printHelp(): void {
   console.log(`
 Claude Hooks v${VERSION}
@@ -92,8 +76,9 @@ Generate Claude-powered hooks from markdown definitions.
 
 Usage:
   claude-hooks setup                              First-time setup (choose storage location)
+  claude-hooks init [--no-copy-command]           Initialize hooks in current project
   claude-hooks generate <files...> [-o <output>]  Generate hooks from markdown
-  claude-hooks install <file> [-o <output>]       Generate and install a hook
+  claude-hooks install <file> [-o <output>]       Generate and install a hook (global)
   claude-hooks settings <hooks...>                Generate settings.json entries
   claude-hooks validate <files...>                Validate markdown definitions
   claude-hooks list                               List installed hooks
@@ -103,7 +88,8 @@ Usage:
   claude-hooks --version                          Show version
 
 Examples:
-  claude-hooks setup                    # First-time setup
+  claude-hooks setup                    # First-time setup (run once)
+  claude-hooks init                     # Initialize hooks in current project
   claude-hooks generate hooks/*.md -o generated/
   claude-hooks install hooks/security-check.md
   claude-hooks validate hooks/security-check.md
@@ -120,6 +106,7 @@ interface ParsedArgs {
   command: string;
   files: string[];
   output: string;
+  noCopyCommand: boolean;
 }
 
 function parseArgs(args: string[]): ParsedArgs {
@@ -127,6 +114,7 @@ function parseArgs(args: string[]): ParsedArgs {
     command: '',
     files: [],
     output: './generated',
+    noCopyCommand: false,
   };
 
   let i = 0;
@@ -145,6 +133,8 @@ function parseArgs(args: string[]): ParsedArgs {
 
     if (arg === '-o' || arg === '--output') {
       parsed.output = args[++i] || './generated';
+    } else if (arg === '--no-copy-command') {
+      parsed.noCopyCommand = true;
     } else if (arg.startsWith('-')) {
       console.error(`Unknown option: ${arg}`);
       process.exit(1);
@@ -321,7 +311,13 @@ async function commandValidate(files: string[]): Promise<void> {
   }
 }
 
-const SETTINGS_PATH = path.join(process.env.HOME || '~', '.claude', 'settings.json');
+// Settings path - can be global or project-local
+function getSettingsPath(local: boolean = false): string {
+  if (local) {
+    return path.join(process.cwd(), '.claude', 'settings.json');
+  }
+  return path.join(process.env.HOME || '~', '.claude', 'settings.json');
+}
 
 interface ClaudeSettings {
   hooks?: {
@@ -337,10 +333,11 @@ interface ClaudeSettings {
   [key: string]: unknown;
 }
 
-function loadSettings(): ClaudeSettings {
+function loadSettings(settingsPath?: string): ClaudeSettings {
+  const targetPath = settingsPath || getSettingsPath();
   try {
-    if (fs.existsSync(SETTINGS_PATH)) {
-      const content = fs.readFileSync(SETTINGS_PATH, 'utf-8');
+    if (fs.existsSync(targetPath)) {
+      const content = fs.readFileSync(targetPath, 'utf-8');
       return JSON.parse(content);
     }
   } catch (error) {
@@ -349,12 +346,13 @@ function loadSettings(): ClaudeSettings {
   return {};
 }
 
-function saveSettings(settings: ClaudeSettings): void {
-  const dir = path.dirname(SETTINGS_PATH);
+function saveSettings(settings: ClaudeSettings, settingsPath?: string): void {
+  const targetPath = settingsPath || getSettingsPath();
+  const dir = path.dirname(targetPath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
+  fs.writeFileSync(targetPath, JSON.stringify(settings, null, 2) + '\n', 'utf-8');
 }
 
 async function commandInstall(files: string[], output: string): Promise<void> {
@@ -471,30 +469,13 @@ async function commandList(): Promise<void> {
 async function commandSetup(): Promise<void> {
   console.log('Setting up Claude Hooks...\n');
 
-  // Check if already configured
-  const existingConfig = loadConfig();
-  let hooksDir: string;
-  let generatedDir: string;
+  // Always use project-local storage (hooks need node_modules access)
+  const hooksDir = path.join(CLAUDE_HOOKS_DIR, 'hooks');
+  const generatedDir = path.join(CLAUDE_HOOKS_DIR, 'generated');
 
-  if (existingConfig) {
-    console.log(`Found existing configuration:`);
-    console.log(`  Hooks directory: ${existingConfig.hooksDir}`);
-    console.log(`  Generated directory: ${existingConfig.generatedDir}\n`);
-
-    const reconfigure = await askQuestion('Reconfigure storage locations? [y/N] ');
-    if (reconfigure.toLowerCase() !== 'y') {
-      hooksDir = existingConfig.hooksDir;
-      generatedDir = existingConfig.generatedDir;
-    } else {
-      const dirs = await askStorageLocation();
-      hooksDir = dirs.hooksDir;
-      generatedDir = dirs.generatedDir;
-    }
-  } else {
-    const dirs = await askStorageLocation();
-    hooksDir = dirs.hooksDir;
-    generatedDir = dirs.generatedDir;
-  }
+  console.log(`Using claude-hooks project directory:`);
+  console.log(`  Hooks directory: ${hooksDir}`);
+  console.log(`  Generated directory: ${generatedDir}\n`);
 
   // Save config
   saveConfig({ hooksDir, generatedDir });
@@ -523,6 +504,12 @@ async function commandSetup(): Promise<void> {
   fs.writeFileSync(commandPath, createHookCommand, 'utf-8');
   console.log(`  ✓ Installed /create-hook command`);
 
+  // Generate the init-hooks command
+  const initCommandPath = path.join(commandsDir, 'init-hooks.md');
+  const initHooksCommand = generateInitHooksCommand();
+  fs.writeFileSync(initCommandPath, initHooksCommand, 'utf-8');
+  console.log(`  ✓ Installed /init-hooks command`);
+
   // Print next steps
   console.log(`
 Setup complete!
@@ -543,29 +530,98 @@ Example usage:
 `);
 }
 
-async function askStorageLocation(): Promise<{ hooksDir: string; generatedDir: string }> {
-  const globalHooksDir = path.join(process.env.HOME || '~', '.claude', 'hooks');
-  const globalGeneratedDir = path.join(process.env.HOME || '~', '.claude', 'hooks', 'generated');
-  const projectHooksDir = path.join(CLAUDE_HOOKS_DIR, 'hooks');
-  const projectGeneratedDir = path.join(CLAUDE_HOOKS_DIR, 'generated');
+async function commandInit(options: { copyCommand?: boolean }): Promise<void> {
+  const projectDir = process.cwd();
+  const projectClaudeDir = path.join(projectDir, '.claude');
+  const projectSettingsPath = path.join(projectClaudeDir, 'settings.json');
 
-  console.log('Where would you like to store your hooks?\n');
-  console.log('  [1] Global (Recommended)');
-  console.log(`      ${globalHooksDir}`);
-  console.log('      Hooks persist independently of this project\n');
-  console.log('  [2] Project-local');
-  console.log(`      ${projectHooksDir}`);
-  console.log('      Hooks are stored in this claude-hooks installation\n');
+  console.log(`Initializing claude-hooks in ${projectDir}...\n`);
 
-  const choice = await askQuestion('Choose [1/2] (default: 1): ');
-
-  if (choice === '2') {
-    console.log(`\n  Using project-local storage`);
-    return { hooksDir: projectHooksDir, generatedDir: projectGeneratedDir };
-  } else {
-    console.log(`\n  Using global storage`);
-    return { hooksDir: globalHooksDir, generatedDir: globalGeneratedDir };
+  // Step 1: Ensure .claude directory exists
+  if (!fs.existsSync(projectClaudeDir)) {
+    fs.mkdirSync(projectClaudeDir, { recursive: true });
+    console.log(`  ✓ Created ${projectClaudeDir}`);
   }
+
+  // Step 2: Use the claude-hooks project's generated directory (where node_modules are available)
+  const generatedDir = path.join(CLAUDE_HOOKS_DIR, 'generated');
+  const qualityRouterPath = path.join(generatedDir, 'quality-router.ts');
+
+  if (!fs.existsSync(qualityRouterPath)) {
+    console.error(`  ✗ quality-router.ts not found at ${qualityRouterPath}`);
+    console.error(`    Run 'claude-hooks setup' first, or check your configuration.`);
+    process.exit(1);
+  }
+
+  // Step 3: Load or create project settings
+  const settings = loadSettings(projectSettingsPath);
+
+  // Step 4: Initialize hooks structure
+  if (!settings.hooks) {
+    settings.hooks = {};
+  }
+  if (!settings.hooks.PostToolUse) {
+    settings.hooks.PostToolUse = [];
+  }
+
+  // Step 5: Add quality-router hook entry
+  const hookEntry = {
+    matcher: 'Edit|Write',
+    hooks: [{
+      type: 'command' as const,
+      command: `npx tsx ${qualityRouterPath}`,
+    }],
+  };
+
+  // Check if already registered (avoid duplicates)
+  const existingIndex = settings.hooks.PostToolUse.findIndex(
+    (h) => h.hooks.some((hh) => hh.command.includes('quality-router.ts'))
+  );
+
+  if (existingIndex >= 0) {
+    settings.hooks.PostToolUse[existingIndex] = hookEntry;
+    console.log(`  ✓ Updated existing quality-router hook in settings.json`);
+  } else {
+    settings.hooks.PostToolUse.push(hookEntry);
+    console.log(`  ✓ Added quality-router hook to settings.json`);
+  }
+
+  // Step 6: Save project settings
+  saveSettings(settings, projectSettingsPath);
+  console.log(`  ✓ Saved ${projectSettingsPath}`);
+
+  // Step 7: Optionally copy /create-hook command
+  if (options.copyCommand !== false) {
+    const projectCommandsDir = path.join(projectClaudeDir, 'commands');
+    const sourceCommand = path.join(process.env.HOME || '~', '.claude', 'commands', 'create-hook.md');
+    const targetCommand = path.join(projectCommandsDir, 'create-hook.md');
+
+    if (fs.existsSync(sourceCommand)) {
+      if (!fs.existsSync(projectCommandsDir)) {
+        fs.mkdirSync(projectCommandsDir, { recursive: true });
+      }
+      const commandContent = fs.readFileSync(sourceCommand, 'utf-8');
+      fs.writeFileSync(targetCommand, commandContent, 'utf-8');
+      console.log(`  ✓ Copied /create-hook command to project`);
+    }
+  }
+
+  // Step 8: Print summary
+  console.log(`
+Initialization complete!
+
+Project Configuration:
+  Settings: ${projectSettingsPath}
+  Hooks from: ${generatedDir}
+
+The quality-router hook is now active for this project.
+It will run on Edit/Write operations and route to appropriate validators.
+
+Next steps:
+  1. Restart Claude Code (or start a new session) in this project
+  2. Edit any file to see the hooks in action
+  3. Use /create-hook to add project-specific validators
+`);
 }
 
 function commandPath(): void {
@@ -718,12 +774,44 @@ Check if the code is good.
 `;
 }
 
+function generateInitHooksCommand(): string {
+  return `---
+description: Initialize claude-hooks in the current project
+allowed-tools: Bash(npx:*)
+---
+
+# Initialize Claude Hooks
+
+Run this command to set up claude-hooks for the current project:
+
+\`\`\`bash
+npx tsx ${CLAUDE_HOOKS_DIR}/src/cli.ts init
+\`\`\`
+
+This will:
+1. Create a \`.claude/settings.json\` file in the current project
+2. Configure the quality-router hook to run on Edit/Write operations
+3. Point to the central claude-hooks generated validators
+
+After running, tell the user to restart Claude Code (or start a new session) for the hooks to take effect.
+
+If initialization fails with "quality-router.ts not found", the user needs to run global setup first:
+\`\`\`bash
+cd ${CLAUDE_HOOKS_DIR} && ./setup.sh
+\`\`\`
+`;
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
   switch (args.command) {
     case 'setup':
       await commandSetup();
+      break;
+
+    case 'init':
+      await commandInit({ copyCommand: !args.noCopyCommand });
       break;
 
     case 'generate':

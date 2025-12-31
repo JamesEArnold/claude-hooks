@@ -15,6 +15,7 @@ import type {
   HookOptions,
   LifecycleEvent,
   FailMode,
+  RouterConfig,
 } from '../types.js';
 import { DEFAULT_OPTIONS, DEFAULT_TRIGGER } from '../types.js';
 
@@ -42,11 +43,29 @@ export function parseMarkdown(content: string): HookDefinition {
   const name = parseName(content);
   const sections = extractSections(content);
 
+  // Check if ## Router section exists in the content (even if empty)
+  const hasRouterSection = /^##\s+router\s*$/im.test(content);
+
   const trigger = parseTrigger(sections.trigger);
   const prompt = parsePrompt(sections.prompt);
   const options = parseOptions(sections.options);
+  const router = parseRouter(sections.router, hasRouterSection);
+  const description = parseDescription(sections.description);
+  const tags = parseTags(sections.tags);
 
-  return { name, trigger, prompt, options };
+  const definition: HookDefinition = { name, trigger, prompt, options };
+
+  // Add optional fields if present
+  if (description) {
+    definition.description = description;
+  }
+  if (tags.length > 0) {
+    definition.tags = tags;
+  }
+  if (router) {
+    definition.router = router;
+  }
+  return definition;
 }
 
 /**
@@ -67,11 +86,21 @@ function extractSections(content: string): {
   trigger?: string;
   prompt?: string;
   options?: string;
+  router?: string;
+  description?: string;
+  tags?: string;
 } {
-  const sections: { trigger?: string; prompt?: string; options?: string } = {};
+  const sections: {
+    trigger?: string;
+    prompt?: string;
+    options?: string;
+    router?: string;
+    description?: string;
+    tags?: string;
+  } = {};
   const lines = content.split('\n');
 
-  let currentSection: 'trigger' | 'prompt' | 'options' | null = null;
+  let currentSection: 'trigger' | 'prompt' | 'options' | 'router' | 'description' | 'tags' | null = null;
   let currentContent: string[] = [];
 
   for (const line of lines) {
@@ -90,6 +119,18 @@ function extractSections(content: string): {
       saveSection(sections, currentSection, currentContent);
       currentSection = 'options';
       currentContent = [];
+    } else if (trimmed.startsWith('## router')) {
+      saveSection(sections, currentSection, currentContent);
+      currentSection = 'router';
+      currentContent = [];
+    } else if (trimmed.startsWith('## description')) {
+      saveSection(sections, currentSection, currentContent);
+      currentSection = 'description';
+      currentContent = [];
+    } else if (trimmed.startsWith('## tags')) {
+      saveSection(sections, currentSection, currentContent);
+      currentSection = 'tags';
+      currentContent = [];
     } else if (trimmed.startsWith('#')) {
       // Skip other headers (like the main hook name)
       continue;
@@ -105,8 +146,8 @@ function extractSections(content: string): {
 }
 
 function saveSection(
-  sections: { trigger?: string; prompt?: string; options?: string },
-  section: 'trigger' | 'prompt' | 'options' | null,
+  sections: { trigger?: string; prompt?: string; options?: string; router?: string; description?: string; tags?: string },
+  section: 'trigger' | 'prompt' | 'options' | 'router' | 'description' | 'tags' | null,
   content: string[]
 ): void {
   if (section && content.length > 0) {
@@ -165,6 +206,33 @@ function parsePrompt(content?: string): string {
 }
 
 /**
+ * Parse the Description section
+ * Returns the first paragraph, trimmed
+ */
+function parseDescription(content?: string): string | undefined {
+  if (content && content.trim().length > 0) {
+    // Return first paragraph (up to first blank line)
+    return content.trim().split('\n\n')[0].trim();
+  }
+  // Return undefined - caller can provide default if needed
+  return undefined;
+}
+
+/**
+ * Parse the Tags section
+ * Returns comma-separated list as lowercase array
+ */
+function parseTags(content?: string): string[] {
+  if (!content) {
+    return [];
+  }
+  return content
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => s.length > 0);
+}
+
+/**
  * Parse the Options section
  */
 function parseOptions(content?: string): HookOptions {
@@ -193,6 +261,38 @@ function parseOptions(content?: string): HookOptions {
   }
 
   return options;
+}
+
+/**
+ * Parse the Router section
+ * Returns RouterConfig if ## Router section exists (even if empty)
+ * Empty callableHooks means "discover all hooks dynamically"
+ */
+function parseRouter(content?: string, sectionExists?: boolean): RouterConfig | undefined {
+  // If router section doesn't exist in the markdown, this is not a router hook
+  if (content === undefined && !sectionExists) {
+    return undefined;
+  }
+
+  // Router section exists - this is a router hook
+  // Parse callable hooks if specified (optional allowlist)
+  let callableHooks: string[] = [];
+
+  if (content) {
+    const lines = content.split('\n').map((l) => l.trim()).filter(Boolean);
+
+    for (const line of lines) {
+      const lower = line.toLowerCase();
+
+      if (lower.startsWith('- callable:')) {
+        const value = extractValue(line, '- callable:');
+        callableHooks = parseList(value);
+      }
+    }
+  }
+
+  // Return RouterConfig with callableHooks (may be empty for full discovery)
+  return { callableHooks };
 }
 
 /**

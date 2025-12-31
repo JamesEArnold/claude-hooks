@@ -48,17 +48,52 @@ export interface HookOptions {
 }
 
 /**
+ * Router configuration for hooks that can invoke other hooks
+ */
+export interface RouterConfig {
+  /** List of hook names this router can invoke (optional allowlist) */
+  callableHooks: string[];
+}
+
+/**
  * Complete hook definition parsed from markdown
  */
 export interface HookDefinition {
   /** Hook name (from markdown header) */
   name: string;
+  /** Short description for routing decisions (from ## Description) */
+  description?: string;
+  /** Categorization tags (from ## Tags) */
+  tags?: string[];
   /** Trigger conditions */
   trigger: HookTrigger;
   /** The validation prompt to send to Claude */
   prompt: string;
   /** Hook options */
   options: HookOptions;
+  /** Router configuration (if this is a router hook) */
+  router?: RouterConfig;
+}
+
+/**
+ * Hook metadata for runtime discovery
+ * Generated as .meta.json alongside each hook .ts file
+ */
+export interface HookMetadata {
+  /** Hook name (matches the generated file name without extension) */
+  name: string;
+  /** Short description for routing decisions */
+  description: string;
+  /** Categorization tags */
+  tags: string[];
+  /** The lifecycle event this hook responds to */
+  event: LifecycleEvent;
+  /** Tools this hook monitors (for PreToolUse/PostToolUse) */
+  tools?: string[];
+  /** File patterns this hook applies to */
+  files?: string[];
+  /** File patterns to skip */
+  skip?: string[];
 }
 
 // ============================================================================

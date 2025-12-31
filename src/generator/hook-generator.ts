@@ -8,7 +8,30 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { parseMarkdownFile, validateHookDefinition } from '../parser/md-parser.js';
-import type { HookDefinition } from '../types.js';
+import type { HookDefinition, HookMetadata } from '../types.js';
+
+/**
+ * Generate metadata JSON file for runtime discovery
+ */
+function generateMetadataFile(
+  definition: HookDefinition,
+  outputDir: string
+): string {
+  const hookSlug = slugify(definition.name);
+  const metadata: HookMetadata = {
+    name: hookSlug,
+    description: definition.description || `Validation hook: ${definition.name}`,
+    tags: definition.tags || [],
+    event: definition.trigger.event,
+    tools: definition.trigger.tools,
+    files: definition.trigger.files,
+    skip: definition.trigger.skip,
+  };
+
+  const metadataPath = path.join(outputDir, `${hookSlug}.meta.json`);
+  fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), 'utf-8');
+  return metadataPath;
+}
 
 /**
  * Generate a hook from a markdown file
@@ -16,7 +39,7 @@ import type { HookDefinition } from '../types.js';
 export function generateHook(
   mdFilePath: string,
   outputDir: string
-): { outputPath: string; definition: HookDefinition } {
+): { outputPath: string; metadataPath: string; definition: HookDefinition } {
   // Parse the markdown file
   const definition = parseMarkdownFile(mdFilePath);
 
@@ -39,7 +62,10 @@ export function generateHook(
   // Write the hook file
   fs.writeFileSync(outputPath, hookCode, 'utf-8');
 
-  return { outputPath, definition };
+  // Generate metadata file for runtime discovery
+  const metadataPath = generateMetadataFile(definition, outputDir);
+
+  return { outputPath, metadataPath, definition };
 }
 
 /**
@@ -48,9 +74,10 @@ export function generateHook(
 export function generateHooks(
   mdFilePaths: string[],
   outputDir: string
-): Array<{ outputPath: string; definition: HookDefinition; error?: string }> {
+): Array<{ outputPath: string; metadataPath?: string; definition: HookDefinition; error?: string }> {
   const results: Array<{
     outputPath: string;
+    metadataPath?: string;
     definition: HookDefinition;
     error?: string;
   }> = [];
@@ -75,6 +102,19 @@ export function generateHooks(
  * Generate TypeScript code for a hook
  */
 function generateHookCode(definition: HookDefinition, sourcePath: string): string {
+  // If this is a router hook, generate router-specific code
+  if (definition.router) {
+    return generateRouterHookCode(definition, sourcePath);
+  }
+
+  // Otherwise, generate standard hook code
+  return generateStandardHookCode(definition, sourcePath);
+}
+
+/**
+ * Generate TypeScript code for a standard (non-router) hook
+ */
+function generateStandardHookCode(definition: HookDefinition, sourcePath: string): string {
   const trigger = JSON.stringify(definition.trigger, null, 2);
   const options = JSON.stringify(definition.options, null, 2);
   const prompt = escapeTemplateString(definition.prompt);
@@ -359,6 +399,482 @@ async function main(): Promise<void> {
         hookSpecificOutput: {
           hookEventName: 'PostToolUse',
           additionalContext: \`Hook error (allowed): \${errorMsg}\`
+        }
+      }));
+    }
+  }
+}
+
+main();
+`;
+}
+
+/**
+ * Generate TypeScript code for a router hook
+ * Router hooks dynamically discover available hooks and call Claude to decide which to run
+ */
+function generateRouterHookCode(definition: HookDefinition, sourcePath: string): string {
+  const trigger = JSON.stringify(definition.trigger, null, 2);
+  const options = JSON.stringify(definition.options, null, 2);
+  const basePrompt = escapeTemplateString(definition.prompt);
+  // Optional allowlist - if specified, only these hooks can be called
+  const allowlist = definition.router?.callableHooks?.length
+    ? JSON.stringify(definition.router.callableHooks)
+    : 'null';
+
+  return `#!/usr/bin/env npx tsx
+/**
+ * Generated Claude Router Hook: ${definition.name}
+ * Source: ${path.basename(sourcePath)}
+ * Generated: ${new Date().toISOString()}
+ *
+ * This is a ROUTER hook with DYNAMIC hook discovery.
+ * It scans for .meta.json files to discover available validators.
+ */
+
+import { query } from '@anthropic-ai/claude-agent-sdk';
+import { spawn } from 'child_process';
+import * as path from 'path';
+import * as fs from 'fs';
+
+// ============================================================================
+// Configuration (from markdown)
+// ============================================================================
+
+const HOOK_NAME = ${JSON.stringify(definition.name)};
+
+const TRIGGER: {
+  event: string;
+  tools?: string[];
+  files?: string[];
+  skip?: string[];
+} = ${trigger};
+
+const OPTIONS = ${options};
+
+// Base routing prompt (hook descriptions are added dynamically)
+const BASE_ROUTING_PROMPT = \`${basePrompt}\`;
+
+// Optional allowlist of hooks (null = discover all)
+const HOOK_ALLOWLIST: string[] | null = ${allowlist};
+
+// Generated hooks directory (same directory as this file)
+const GENERATED_DIR = path.dirname(new URL(import.meta.url).pathname);
+
+// ============================================================================
+// Dynamic Hook Discovery
+// ============================================================================
+
+interface HookMetadata {
+  name: string;
+  description: string;
+  tags: string[];
+  event: string;
+  tools?: string[];
+  files?: string[];
+  skip?: string[];
+}
+
+let cachedHooks: HookMetadata[] | null = null;
+
+function discoverHooks(): HookMetadata[] {
+  if (cachedHooks !== null) {
+    return cachedHooks;
+  }
+
+  const hooks: HookMetadata[] = [];
+
+  try {
+    const files = fs.readdirSync(GENERATED_DIR);
+    const metaFiles = files.filter(f => f.endsWith('.meta.json'));
+
+    for (const metaFile of metaFiles) {
+      try {
+        const content = fs.readFileSync(path.join(GENERATED_DIR, metaFile), 'utf-8');
+        const metadata: HookMetadata = JSON.parse(content);
+
+        // Skip router hooks themselves
+        if (metadata.name === HOOK_NAME || metadata.name.includes('router')) {
+          continue;
+        }
+
+        // If allowlist is specified, only include listed hooks
+        if (HOOK_ALLOWLIST !== null && !HOOK_ALLOWLIST.includes(metadata.name)) {
+          continue;
+        }
+
+        hooks.push(metadata);
+      } catch {
+        // Skip invalid metadata files
+      }
+    }
+  } catch {
+    // Directory read failed
+  }
+
+  cachedHooks = hooks;
+  return hooks;
+}
+
+function buildDynamicRoutingPrompt(hooks: HookMetadata[]): string {
+  if (hooks.length === 0) {
+    return BASE_ROUTING_PROMPT;
+  }
+
+  const hookDescriptions = hooks
+    .map(h => {
+      const tags = h.tags.length > 0 ? \` [tags: \${h.tags.join(', ')}]\` : '';
+      return \`- \${h.name}: \${h.description}\${tags}\`;
+    })
+    .join('\\n');
+
+  return \`\${BASE_ROUTING_PROMPT}
+
+Available validators:
+\${hookDescriptions}
+
+Return ONLY a JSON array of validator names from the list above. No explanation needed.\`;
+}
+
+// ============================================================================
+// Hook Invocation
+// ============================================================================
+
+interface HookOutput {
+  decision?: 'block';
+  reason?: string;
+  hookSpecificOutput?: {
+    hookEventName: 'PostToolUse';
+    additionalContext?: string;
+  };
+}
+
+interface HookInvocationResult {
+  hookName: string;
+  output: HookOutput;
+  success: boolean;
+  error?: string;
+}
+
+async function invokeHook(hookName: string, input: unknown): Promise<HookInvocationResult> {
+  const hookPath = path.join(GENERATED_DIR, \`\${hookName}.ts\`);
+
+  if (!fs.existsSync(hookPath)) {
+    return {
+      hookName,
+      output: {},
+      success: false,
+      error: \`Hook file not found: \${hookPath}\`,
+    };
+  }
+
+  return new Promise((resolve) => {
+    const child = spawn('npx', ['tsx', hookPath], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: GENERATED_DIR,
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data: Buffer) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on('data', (data: Buffer) => {
+      stderr += data.toString();
+    });
+
+    child.stdin.write(JSON.stringify(input));
+    child.stdin.end();
+
+    child.on('close', (code: number | null) => {
+      let output: HookOutput = {};
+      try {
+        const jsonMatch = stdout.match(/\\{[\\s\\S]*\\}/);
+        if (jsonMatch) {
+          output = JSON.parse(jsonMatch[0]);
+        }
+      } catch {
+        // If no valid JSON output, treat as allow
+      }
+
+      if (code !== 0 && !output.decision) {
+        output.decision = 'block';
+      }
+
+      resolve({
+        hookName,
+        output,
+        success: code === 0,
+        error: stderr || undefined,
+      });
+    });
+
+    child.on('error', (err: Error) => {
+      resolve({
+        hookName,
+        output: {},
+        success: false,
+        error: err.message,
+      });
+    });
+  });
+}
+
+async function invokeHooksParallel(hookNames: string[], input: unknown): Promise<HookInvocationResult[]> {
+  const promises = hookNames.map((name) => invokeHook(name, input));
+  return Promise.all(promises);
+}
+
+// ============================================================================
+// Claude Integration (for routing decisions)
+// ============================================================================
+
+const SYSTEM_PROMPT = \`You are a code quality router. Your job is to analyze code and decide which validators should run.
+
+Return ONLY a JSON array of validator names. No other text.
+Example: ["validate-security", "validate-yagni"]
+
+If no validators apply, return an empty array: []\`;
+
+async function callClaude(prompt: string): Promise<string> {
+  const textParts: string[] = [];
+
+  for await (const message of query({
+    prompt,
+    options: {
+      systemPrompt: SYSTEM_PROMPT,
+      maxTurns: 1,
+      disallowedTools: [
+        'Read', 'Write', 'Edit', 'MultiEdit', 'Bash', 'Glob', 'Grep',
+        'WebFetch', 'WebSearch', 'TodoRead', 'TodoWrite', 'Task', 'NotebookEdit'
+      ],
+    },
+  })) {
+    if (message.type === 'assistant') {
+      const content = message.message?.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block.type === 'text' && typeof block.text === 'string') {
+            textParts.push(block.text);
+          }
+        }
+      }
+    } else if (message.type === 'result' && 'subtype' in message && message.subtype === 'success') {
+      if ('result' in message && typeof message.result === 'string') {
+        return message.result;
+      }
+    }
+  }
+
+  if (textParts.length > 0) {
+    return textParts.join('\\n');
+  }
+
+  throw new Error('No response from Claude');
+}
+
+function parseHookList(response: string, validHookNames: string[]): string[] {
+  try {
+    const match = response.match(/\\[[\\s\\S]*?\\]/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      if (Array.isArray(parsed) && parsed.every(item => typeof item === 'string')) {
+        // Filter to only discovered hooks
+        return parsed.filter(name => validHookNames.includes(name));
+      }
+    }
+  } catch {
+    // Parsing failed
+  }
+  return [];
+}
+
+// ============================================================================
+// Hook Logic
+// ============================================================================
+
+interface HookInput {
+  tool_name?: string;
+  tool_input?: Record<string, unknown>;
+  tool_result?: unknown;
+  prompt?: string;
+  reason?: string;
+}
+
+function shouldTrigger(input: HookInput): boolean {
+  if (TRIGGER.tools && TRIGGER.tools.length > 0) {
+    if (!input.tool_name || !TRIGGER.tools.includes(input.tool_name)) {
+      return false;
+    }
+  }
+
+  const filePath = (input.tool_input as { file_path?: string })?.file_path;
+  if (filePath) {
+    if (TRIGGER.skip && matchesAnyPattern(filePath, TRIGGER.skip)) {
+      return false;
+    }
+    if (TRIGGER.files && TRIGGER.files.length > 0) {
+      if (!matchesAnyPattern(filePath, TRIGGER.files)) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+function matchesAnyPattern(filePath: string, patterns: string[]): boolean {
+  const fileName = filePath.split('/').pop() || filePath;
+
+  return patterns.some(pattern => {
+    let regex = pattern
+      .replace(/\\./g, '\\\\.')
+      .replace(/\\*\\*/g, '{{GLOBSTAR}}')
+      .replace(/\\*/g, '[^/]*')
+      .replace(/{{GLOBSTAR}}/g, '.*')
+      .replace(/\\?/g, '.');
+
+    if (pattern.startsWith('**/')) {
+      return new RegExp(\`\${regex}$\`).test(filePath);
+    }
+    if (!pattern.includes('/')) {
+      return new RegExp(\`^\${regex}$\`).test(fileName);
+    }
+    return new RegExp(\`\${regex}$\`).test(filePath);
+  });
+}
+
+function buildContextPrompt(input: HookInput, dynamicPrompt: string): string {
+  let context = '';
+
+  const toolInput = input.tool_input as { file_path?: string; content?: string; new_string?: string };
+  if (toolInput?.file_path) {
+    context += \`File: \${toolInput.file_path}\\n\\n\`;
+  }
+  if (toolInput?.content) {
+    context += \`Content:\\n\\\`\\\`\\\`\\n\${toolInput.content}\\n\\\`\\\`\\\`\\n\\n\`;
+  }
+  if (toolInput?.new_string) {
+    context += \`New content:\\n\\\`\\\`\\\`\\n\${toolInput.new_string}\\n\\\`\\\`\\\`\\n\\n\`;
+  }
+
+  return \`\${dynamicPrompt}\\n\\n\${context}\`;
+}
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString('utf-8');
+}
+
+async function main(): Promise<void> {
+  try {
+    const inputStr = await readStdin();
+
+    if (!inputStr.trim()) {
+      console.log('{}');
+      return;
+    }
+
+    let input: HookInput;
+    try {
+      input = JSON.parse(inputStr);
+    } catch {
+      console.log('{}');
+      return;
+    }
+
+    if (!shouldTrigger(input)) {
+      console.log(JSON.stringify({
+        reason: \`[\${HOOK_NAME}] Skipped - trigger conditions not met\`
+      }));
+      return;
+    }
+
+    // Step 1: Discover available hooks
+    const discoveredHooks = discoverHooks();
+    const validHookNames = discoveredHooks.map(h => h.name);
+
+    if (discoveredHooks.length === 0) {
+      console.log(JSON.stringify({
+        reason: \`[\${HOOK_NAME}] No validators discovered in \${GENERATED_DIR}\`
+      }));
+      return;
+    }
+
+    // Step 2: Build dynamic routing prompt with discovered hook descriptions
+    const dynamicPrompt = buildDynamicRoutingPrompt(discoveredHooks);
+    const fullPrompt = buildContextPrompt(input, dynamicPrompt);
+
+    // Step 3: Call Claude to get list of hooks to run
+    const routingResponse = await callClaude(fullPrompt);
+    const hooksToRun = parseHookList(routingResponse, validHookNames);
+
+    if (hooksToRun.length === 0) {
+      console.log(JSON.stringify({
+        reason: \`[\${HOOK_NAME}] No validators needed for this file\`
+      }));
+      return;
+    }
+
+    // Step 4: Invoke the selected hooks in parallel
+    const results = await invokeHooksParallel(hooksToRun, input);
+
+    // Step 5: Aggregate results
+    const reasons: string[] = [];
+    let shouldBlock = false;
+
+    for (const result of results) {
+      if (result.output.decision === 'block') {
+        shouldBlock = true;
+      }
+      if (result.output.reason) {
+        reasons.push(result.output.reason);
+      }
+      if (result.error) {
+        reasons.push(\`[\${result.hookName}] Error: \${result.error}\`);
+      }
+    }
+
+    const output: HookOutput = {
+      decision: shouldBlock ? 'block' : undefined,
+      reason: reasons.length > 0
+        ? \`[\${HOOK_NAME}] Ran \${hooksToRun.join(', ')}:\\n\\n\${reasons.join('\\n\\n')}\`
+        : \`[\${HOOK_NAME}] All validators passed\`,
+      hookSpecificOutput: {
+        hookEventName: 'PostToolUse',
+        additionalContext: \`Router discovered \${discoveredHooks.length} hooks, invoked: \${hooksToRun.join(', ')}\`
+      }
+    };
+
+    if (!output.decision) {
+      delete output.decision;
+    }
+
+    console.log(JSON.stringify(output));
+
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+
+    if (OPTIONS.failMode === 'closed') {
+      console.log(JSON.stringify({
+        decision: 'block',
+        reason: \`[\${HOOK_NAME}] Router error (fail-closed): \${errorMsg}\`,
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUse',
+          additionalContext: \`Router error: \${errorMsg}\`
+        }
+      }));
+    } else {
+      console.log(JSON.stringify({
+        reason: \`[\${HOOK_NAME}] Router error (fail-open): \${errorMsg}\`,
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUse',
+          additionalContext: \`Router error (allowed): \${errorMsg}\`
         }
       }));
     }

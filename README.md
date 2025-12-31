@@ -23,26 +23,25 @@ Check for console.log statements. Block if any are found.
 - Fail Mode: closed
 ```
 
-## Installation
+## Quick Start
+
+### Step 1: Install (one time)
 
 ```bash
-# Clone the repository
-git clone https://github.com/your-username/claude-hooks.git
+git clone https://github.com/JamesEArnold/claude-hooks.git
 cd claude-hooks
-
-# Run setup
 ./setup.sh
 ```
 
-The setup script will:
-1. Install dependencies
-2. Build the project
-3. Ask where you want to store hooks (global or project-local)
-4. Install the `/create-hook` command for Claude Code
+### Step 2: Add to your project
 
-**Storage options:**
-- **Global (Recommended)**: `~/.claude/hooks/` - Hooks persist independently of where you cloned this project
-- **Project-local**: `<project>/hooks/` - Hooks are stored within this claude-hooks installation
+Open Claude Code in your project and run:
+
+```
+/init-hooks
+```
+
+That's it! Restart Claude Code and your project now has AI-powered validation hooks.
 
 ## Usage
 
@@ -113,8 +112,11 @@ npx tsx src/cli.ts install hooks/detect-secrets.md
 ## CLI Commands
 
 ```bash
-# First-time setup (choose storage location)
+# First-time setup
 npx tsx src/cli.ts setup
+
+# Initialize hooks in current project
+npx tsx src/cli.ts init
 
 # Create and install a hook
 npx tsx src/cli.ts install hooks/my-hook.md
@@ -130,9 +132,6 @@ npx tsx src/cli.ts list
 
 # Show current configuration
 npx tsx src/cli.ts config
-
-# Show installation path
-npx tsx src/cli.ts path
 ```
 
 ## How It Works
